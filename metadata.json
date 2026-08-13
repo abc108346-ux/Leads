@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "Prospecção Inteligente",
+  "description": "Buscador semântico de leads e empresas sem site usando Geoapify e Gemini.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -1,6 +1,6 @@
 import { api } from '../services/api.js';
 import { db } from '../services/db.js';
-import { createIcons, MapPin, Phone, MessageCircle, Plus, AlertCircle, Loader2, Check, Search } from 'lucide';
+import { createIcons, MapPin, Phone, MessageCircle, Plus, AlertCircle, Loader2, Check, Search, Star, Copy, Map, ExternalLink, Globe, Globe2 } from 'lucide';
 
 let currentResults = [];
 
@@ -56,8 +56,8 @@ export function renderSearchPage(container) {
 
       <div id="loading-state" class="hidden flex-col items-center justify-center py-12">
         <i data-lucide="loader-2" class="w-8 h-8 text-blue-600 animate-spin mb-4"></i>
-        <p class="text-gray-600 font-medium">Buscando empresas reais na base de dados (OSM)...</p>
-        <p class="text-gray-400 text-sm mt-1">Isso pode levar alguns segundos dependendo da região.</p>
+        <p class="text-gray-600 font-medium">Buscando e analisando leads com Inteligência Artificial...</p>
+        <p class="text-gray-400 text-sm mt-1">A IA está filtrando endereços falsos e escolhendo as empresas mais relevantes.</p>
       </div>
       
       <div id="error-state" class="hidden bg-red-50 border border-red-200 text-red-700 p-4 rounded-lg flex items-start gap-3">
@@ -130,38 +130,64 @@ export function renderSearchPage(container) {
 function renderResultCards(container, results) {
   container.innerHTML = results.map((lead, index) => {
     const hasPhone = !!lead.phone;
-    const isNoSite = lead.websiteStatus === 'Sem site';
-
+    const isNoSite = lead.websiteStatus === 'SEM SITE';
+    
+    // Fallbacks and extra data
+    const phoneToCopy = lead.phone || 'Não disponível';
+    const addressToCopy = lead.address || 'Não disponível';
+    const mapLink = lead.lat && lead.lon ? `https://www.google.com/maps/search/?api=1&query=${lead.lat},${lead.lon}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lead.address)}`;
+    
     return `
       <div class="bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
         <div class="p-5 flex-1">
           <div class="flex justify-between items-start mb-3">
-            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${isNoSite ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-800'}">
-              ${lead.websiteStatus}
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${isNoSite ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}">
+              <i data-lucide="${isNoSite ? 'globe-2' : 'globe'}" class="w-3 h-3 mr-1"></i> ${lead.websiteStatus}
             </span>
             <span class="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-1 rounded-md uppercase tracking-wider">${lead.category}</span>
           </div>
           
           <h4 class="text-lg font-bold text-gray-900 mb-1 leading-tight">${lead.name}</h4>
+          ${lead.rating ? `
+          <div class="flex items-center gap-1 text-sm text-yellow-600 font-medium mb-2">
+            <i data-lucide="star" class="w-4 h-4 fill-current"></i>
+            <span>${lead.rating}</span>
+            <span class="text-gray-400 font-normal ml-1">(${lead.reviewsCount} avaliações)</span>
+          </div>` : ''}
           
-          <div class="space-y-2 mt-4">
+          <div class="space-y-3 mt-4">
             <div class="flex items-start gap-2 text-sm text-gray-600">
               <i data-lucide="map-pin" class="w-4 h-4 shrink-0 mt-0.5 text-gray-400"></i>
-              <span class="line-clamp-2">${lead.address}</span>
+              <div class="flex-1">
+                <span class="line-clamp-2">${lead.address}</span>
+              </div>
             </div>
             
-            ${hasPhone ? `
-              <div class="flex items-center gap-2 text-sm text-gray-600">
-                <i data-lucide="phone" class="w-4 h-4 shrink-0 text-gray-400"></i>
-                <span>${lead.phone}</span>
-              </div>
-            ` : `
-              <div class="flex items-center gap-2 text-sm text-gray-400 italic">
-                <i data-lucide="phone" class="w-4 h-4 shrink-0"></i>
-                <span>Telefone não disponível</span>
-              </div>
-            `}
+            <div class="flex items-center gap-2 text-sm ${hasPhone ? 'text-gray-600' : 'text-gray-400 italic'}">
+              <i data-lucide="phone" class="w-4 h-4 shrink-0 ${hasPhone ? 'text-gray-400' : ''}"></i>
+              <span>${hasPhone ? lead.phone : 'Telefone não disponível'}</span>
+            </div>
+            
+            <div class="flex items-center gap-2 text-sm text-gray-600">
+               <i data-lucide="globe" class="w-4 h-4 shrink-0 text-gray-400"></i>
+               <span class="truncate">${lead.website ? lead.website : (lead.instagram ? lead.instagram : 'Não encontrado')}</span>
+            </div>
           </div>
+        </div>
+        
+        <div class="px-5 pb-3 flex flex-wrap gap-2">
+          ${hasPhone ? `<button onclick="navigator.clipboard.writeText('${phoneToCopy}')" class="text-xs border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 px-2 py-1.5 rounded flex items-center gap-1" title="Copiar Telefone">
+            <i data-lucide="copy" class="w-3 h-3"></i> Telefone
+          </button>` : ''}
+          <button onclick="navigator.clipboard.writeText('${addressToCopy}')" class="text-xs border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 px-2 py-1.5 rounded flex items-center gap-1" title="Copiar Endereço">
+            <i data-lucide="copy" class="w-3 h-3"></i> Endereço
+          </button>
+          <a href="${mapLink}" target="_blank" class="text-xs border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 px-2 py-1.5 rounded flex items-center gap-1" title="Abrir no Mapa">
+            <i data-lucide="map" class="w-3 h-3"></i> Mapa
+          </a>
+          ${lead.website || lead.instagram ? `<a href="${lead.website || lead.instagram}" target="_blank" class="text-xs border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 px-2 py-1.5 rounded flex items-center gap-1" title="Abrir Site">
+            <i data-lucide="external-link" class="w-3 h-3"></i> Site
+          </a>` : ''}
         </div>
         
         <div class="p-4 border-t border-gray-100 bg-gray-50 flex gap-2">
@@ -173,7 +199,7 @@ function renderResultCards(container, results) {
     `;
   }).join('');
 
-  createIcons({ icons: { MapPin, Phone, MessageCircle, Plus } });
+  createIcons({ icons: { MapPin, Phone, MessageCircle, Plus, Star, Copy, Map, ExternalLink, Globe, Globe2, Loader2, Check } });
 
   // Attach event listeners to Add buttons
   container.querySelectorAll('.add-lead-btn').forEach(btn => {

@@ -1,6 +1,10 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { GoogleGenAI, Type } from "@google/genai";
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -8,69 +12,143 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-// Enable JSON parsing for potential POST bodies
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-const OVERPASS_INSTANCES = [
-  'https://overpass.openstreetmap.fr/api/interpreter', // Currently most reliable
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter'
-];
-
-app.all('/api/overpass', async (req, res) => {
-  const query = req.query.data || req.body.data;
-  
-  if (!query) {
-    return res.status(400).json({ error: "No data provided" });
-  }
-
-  let lastError = null;
-
-  for (const instance of OVERPASS_INSTANCES) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
-
-      // Prefer POST to avoid URI too long and to be nice to caches
-      const response = await fetch(instance, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'LeadProspectingApp/1.0 (Contact: webmaster@localhost)'
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = await response.json();
-        return res.json(data);
-      } else {
-        console.warn(`Instance ${instance} returned ${response.status}`);
-        lastError = `Status ${response.status}`;
-      }
-    } catch (err) {
-      console.warn(`Instance ${instance} failed: ${err.message}`);
-      lastError = err.message;
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
     }
   }
-  
-  console.error("All Overpass instances failed.");
-  return res.status(502).json({ error: "Todos os servidores de busca estão ocupados. Tente novamente.", details: lastError });
 });
 
-// Serve static files from the dist directory
-app.use(express.static(path.join(__dirname, 'dist')));
+// Endpoint to determine Geoapify categories based on user query
+app.post('/api/gemini/categories', async (req, res) => {
+  try {
+    const { query } = req.body;
+    
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required' });
+    }
 
-// Send all other requests to the React/Vite index.html (SPA routing)
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    const response = await ai.models.generateContent({
+      model: "gemini-3.6-flash",
+      contents: `The user wants to find businesses in this niche: "${query}".
+Identify the most relevant Geoapify Places API categories for this search.
+
+Geoapify categories guide:
+- commercial: for stores, shops, supermarkets (e.g., commercial.clothing, commercial.health_and_beauty)
+- catering: for food/drinks (e.g., catering.restaurant, catering.cafe, catering.fast_food, catering.bar)
+- service: for services (e.g., service.vehicle, service.beauty, service.financial)
+- healthcare: for clinics, doctors, dentists, vets (e.g., healthcare.clinic_or_praxis, healthcare.dentist, healthcare.hospital.veterinary)
+- sport: for gyms, fitness (e.g., sport.fitness, sport.sports_centre)
+- education: for schools (e.g., education.school, education.driving_school)
+- accommodation: for hotels (e.g., accommodation.hotel)
+- office: for corporate offices, real estate (e.g., office.estate_agent)
+
+Return ONLY a JSON array of strings containing the most appropriate Geoapify category strings to use for the API call (max 4 specific categories). Do not include any explanations. If the query is broad, return the broad category (e.g., "commercial").`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.STRING
+          }
+        },
+      }
+    });
+
+    const categories = JSON.parse(response.text);
+    res.json({ categories: categories.length > 0 ? categories : ['commercial'] });
+
+  } catch (error) {
+    console.error('Error generating categories:', error);
+    res.status(500).json({ error: 'Failed to generate categories' });
+  }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+// Endpoint to semantically filter and score Geoapify results
+app.post('/api/gemini/filter', async (req, res) => {
+  try {
+    const { query, city, places } = req.body;
+    
+    if (!query || !places || !Array.isArray(places)) {
+      return res.status(400).json({ error: 'Query and places array are required' });
+    }
+
+    if (places.length === 0) {
+      return res.json({ scoredPlaces: [] });
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.6-flash",
+      contents: `You are an AI filtering system for a lead generation CRM.
+The user is searching for: "${query}" in the city of "${city}".
+Your goal is to find REAL businesses matching this intention and discard irrelevant results.
+
+IMPORTANT RULES:
+- The goal is to find BUSINESSES/ESTABLISHMENTS.
+- NEVER accept streets, avenues, generic neighborhoods, or pure geographical points without a business name.
+- If the user searches "restaurante", "Av. Assis Brasil" or "Rua X" is IRRELEVANT.
+- Evaluate the semantic match. If they search "loja de roupas femininas", a place named "Boutique Maria" with category "commercial.clothing" is highly relevant.
+- Validate if the place seems to be in the requested city or nearby.
+
+Score each place from 0 to 100 based on how well it matches the user's intent.
+- 0-39: Discard (streets, avenues, completely unrelated, generic city names)
+- 40-69: Low relevance (vaguely related but not what the user explicitly wants)
+- 70-84: Relevant (good match)
+- 85-100: Highly relevant (perfect match for the niche)
+
+Here are the places:
+${JSON.stringify(places, null, 2)}
+
+Return a JSON array of objects, one for each place evaluated.`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              id: { type: Type.STRING, description: "The ID of the place" },
+              score: { type: Type.NUMBER, description: "Relevance score from 0 to 100" },
+              reason: { type: Type.STRING, description: "Brief reason for the score" }
+            },
+            required: ["id", "score", "reason"]
+          }
+        },
+      }
+    });
+
+    const evaluatedPlaces = JSON.parse(response.text);
+    res.json({ evaluatedPlaces });
+
+  } catch (error) {
+    console.error('Error filtering places:', error);
+    res.status(500).json({ error: 'Failed to filter places' });
+  }
 });
 
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer } = await import('vite');
+    const vite = await createServer({
+      server: { middlewareMode: true },
+      appType: 'spa'
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, 'dist')));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    });
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
+
+startServer();
