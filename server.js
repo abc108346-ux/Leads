@@ -79,7 +79,7 @@ app.post('/api/gemini/filter', async (req, res) => {
     }
 
     if (places.length === 0) {
-      return res.json({ scoredPlaces: [] });
+      return res.json({ validIds: [] });
     }
 
     const response = await ai.models.generateContent({
@@ -95,35 +95,23 @@ IMPORTANT RULES:
 - Evaluate the semantic match. If they search "loja de roupas femininas", a place named "Boutique Maria" with category "commercial.clothing" is highly relevant.
 - Validate if the place seems to be in the requested city or nearby.
 
-Score each place from 0 to 100 based on how well it matches the user's intent.
-- 0-39: Discard (streets, avenues, completely unrelated, generic city names)
-- 40-69: Low relevance (vaguely related but not what the user explicitly wants)
-- 70-84: Relevant (good match)
-- 85-100: Highly relevant (perfect match for the niche)
-
 Here are the places:
 ${JSON.stringify(places, null, 2)}
 
-Return a JSON array of objects, one for each place evaluated.`,
+Return a JSON array containing ONLY the IDs (strings) of the places that are highly relevant businesses. Do NOT return scores or reasons, just the IDs of the valid ones.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.ARRAY,
           items: {
-            type: Type.OBJECT,
-            properties: {
-              id: { type: Type.STRING, description: "The ID of the place" },
-              score: { type: Type.NUMBER, description: "Relevance score from 0 to 100" },
-              reason: { type: Type.STRING, description: "Brief reason for the score" }
-            },
-            required: ["id", "score", "reason"]
+            type: Type.STRING
           }
         },
       }
     });
 
-    const evaluatedPlaces = JSON.parse(response.text);
-    res.json({ evaluatedPlaces });
+    const validIds = JSON.parse(response.text);
+    res.json({ validIds });
 
   } catch (error) {
     console.error('Error filtering places:', error);

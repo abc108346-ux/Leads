@@ -68,36 +68,53 @@ export class GeoapifySearchService {
       console.warn("Erro ao buscar categorias na IA, usando fallback 'commercial'", err);
     }
 
-    // 3. Buscar os locais via Places API (com paginação para garantir resultados suficientes)
+    // 3. Buscar os locais via Places API (Lote duplo paralelo para velocidade e contorno do limite de 50)
     let validFeatures = [];
     const targetResults = 20; // Alvo de resultados válidos
-    const maxPages = 3;
-    const limit = 50;
+    const limit = 50; // Geoapify aceita no máximo 50 por request
 
-    let offset = 0;
-    const scoresMap = new Map();
+    try {
+      // Faz duas buscas em paralelo (offset 0 e 50) para pegar 100 resultados de uma vez na mesma velocidade
+      const [placesResponse1, placesResponse2] = await Promise.all([
+        fetch(`https://api.geoapify.com/v2/places?categories=${categories}&filter=place:${placeId}&limit=${limit}&offset=0&apiKey=${key}`),
+        fetch(`https://api.geoapify.com/v2/places?categories=${categories}&filter=place:${placeId}&limit=${limit}&offset=50&apiKey=${key}`)
+      ]);
+      
+      let allFeatures = [];
+      
+      if (placesResponse1.ok) {
+        const data1 = await placesResponse1.json();
+        if (data1.features) allFeatures = allFeatures.concat(data1.features);
+      }
+      
+      if (placesResponse2.ok) {
+        const data2 = await placesResponse2.json();
+        if (data2.features) allFeatures = allFeatures.concat(data2.features);
+      }
 
-    for (let page = 0; page < maxPages; page++) {
-      try {
-        const placesResponse = await fetch(`https://api.geoapify.com/v2/places?categories=${categories}&filter=place:${placeId}&limit=${limit}&offset=${offset}&apiKey=${key}`);
-        
-        if (!placesResponse.ok) {
-          if (placesResponse.status === 401) throw new Error("API Key da Geoapify inválida ou não autorizada.");
-          if (placesResponse.status === 429) throw new Error("Limite de requisições da Geoapify atingido.");
-          throw new Error("Erro da Geoapify ao buscar estabelecimentos.");
-        }
+      if (!placesResponse1.ok && !placesResponse2.ok) {
+         if (placesResponse1.status === 401) throw new Error("API Key da Geoapify inválida ou não autorizada.");
+         if (placesResponse1.status === 429) throw new Error("Limite de requisições da Geoapify atingido.");
+         
+         const errText = await placesResponse1.text();
+         console.error("Geoapify Error:", errText);
+         throw new Error("Erro da Geoapify ao buscar estabelecimentos.");
+      }
 
-        const placesData = await placesResponse.json();
-        const features = placesData.features || [];
-        
-        if (features.length === 0) {
-          break; // Sem mais resultados na API
-        }
+      if (allFeatures.length > 0) {
+        // Pré-filtro ultra-rápido: remove locais sem nome e remove duplicatas exatas
+        const uniqueIds = new Set();
+        const candidates = allFeatures.filter(f => {
+          if (!f.properties.name || f.properties.name.trim() === "") return false;
+          if (uniqueIds.has(f.properties.place_id)) return false;
+          uniqueIds.add(f.properties.place_id);
+          return true;
+        });
 
-        // 4. Filtrar semanticamente os resultados desta página usando a IA
-        const simplifiedPlaces = features.map(f => ({
+        // 4. Filtrar semanticamente os resultados usando a IA (Apenas IDs para ser rápido)
+        const simplifiedPlaces = candidates.map(f => ({
           id: f.properties.place_id,
-          name: f.properties.name || "Sem nome",
+          name: f.properties.name,
           address: f.properties.formatted || "",
           categories: f.properties.categories || []
         }));
@@ -110,49 +127,28 @@ export class GeoapifySearchService {
           });
           
           if (filterResponse.ok) {
-            const { evaluatedPlaces } = await filterResponse.json();
+            const { validIds } = await filterResponse.json();
             
-            if (evaluatedPlaces && evaluatedPlaces.length > 0) {
-               evaluatedPlaces.forEach(ep => scoresMap.set(ep.id, ep.score));
+            if (validIds && validIds.length > 0) {
+               const validIdsSet = new Set(validIds);
                
-               // Adiciona os válidos desta página
-               const validPageFeatures = features.filter(f => (scoresMap.get(f.properties.place_id) || 0) >= 70);
-               
-               // Remove duplicatas manuais antes de adicionar à lista principal
-               validPageFeatures.forEach(vf => {
-                 if (!validFeatures.some(existing => existing.properties.place_id === vf.properties.place_id)) {
-                   validFeatures.push(vf);
-                 }
-               });
+               // Filtra os originais mantendo a ordem da Geoapify (que já é por relevância)
+               validFeatures = candidates.filter(f => validIdsSet.has(f.properties.place_id));
             }
           }
         } catch (err) {
-          console.warn("Erro no filtro semântico da IA. Ignorando página.", err);
+          console.warn("Erro no filtro semântico da IA. Exibindo resultados brutos.", err);
+          validFeatures = candidates;
         }
-
-        // Se já alcançamos o alvo de 20 resultados bons, paramos a busca
-        if (validFeatures.length >= targetResults) {
-          break;
-        }
-
-        // Próxima página
-        offset += limit;
-
-      } catch (err) {
-        console.error("Places API Error during pagination:", err);
-        if (validFeatures.length > 0) {
-          break; // Retorna o que já conseguiu se der erro em páginas seguintes
-        }
-        throw err;
       }
+    } catch (err) {
+      console.error("Places API Error:", err);
+      throw err;
     }
 
     if (validFeatures.length === 0) {
       throw new Error(`A IA analisou as regiões, mas não encontrou empresas altamente relevantes para "${query}". Tente outro termo ou verifique se a cidade possui esses estabelecimentos.`);
     }
-
-    // Ordena todos os resultados válidos capturados (decrescente por score)
-    validFeatures.sort((a, b) => (scoresMap.get(b.properties.place_id) || 0) - (scoresMap.get(a.properties.place_id) || 0));
 
     // Limita ao alvo solicitado
     const finalFeatures = validFeatures.slice(0, targetResults);
