@@ -8,8 +8,6 @@ export class LeadProspectingService {
   }
 
   async searchCompanies(query, city, state, country, onlyWithoutWebsite) {
-    // Basic mapping of user query to OSM tags. 
-    // In a production environment, this would be more robust.
     const term = query.toLowerCase();
     let tag = '';
     
@@ -26,36 +24,74 @@ export class LeadProspectingService {
     } else if (term.includes('loja')) {
       tag = '"shop"';
     } else {
-      // General fallback using name
       tag = `"name"~"${query}",i`;
     }
 
     const websiteFilter = onlyWithoutWebsite ? '[!"website"][!"contact:website"]' : '';
     
-    // Construct Overpass QL query
-    // Search within the specific city (admin_level 8) or Country (admin_level 2).
-    const locationQuery = city ? `area["name"~"${city}",i]["admin_level"="8"]->.searchArea;` : `area["name"~"Brasil",i]["admin_level"="2"]->.searchArea;`;
-    const searchArea = city ? '(area.searchArea)' : '(area.searchArea)';
-
-    const overpassQuery = `
-      [out:json][timeout:25];
-      ${locationQuery}
-      (
-        node[${tag}]${websiteFilter}${searchArea};
-        way[${tag}]${websiteFilter}${searchArea};
-        relation[${tag}]${websiteFilter}${searchArea};
-      );
-      out center 150;
-    `;
-
+    // Step 1: Geocoding via Nominatim to get Bounding Box (Much faster than Area)
+    let bboxString = '';
+    const locationStr = city ? (state ? `${city}, ${state}, Brasil` : `${city}, Brasil`) : 'Brasil';
+    
     try {
-      const response = await fetch(`${this.baseUrl}?data=${encodeURIComponent(overpassQuery)}`);
-
-      if (response.status === 429) {
-        throw new Error('Serviço de busca sobrecarregado. Tente novamente em alguns segundos.');
+      const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(locationStr)}&format=json&limit=1`, {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (geoRes.ok) {
+        const geoData = await geoRes.json();
+        if (geoData && geoData.length > 0 && geoData[0].boundingbox) {
+          const b = geoData[0].boundingbox;
+          bboxString = `[bbox:${b[0]},${b[2]},${b[1]},${b[3]}]`;
+        }
       }
+    } catch (e) {
+      console.warn("Geocoding falhou, usando busca por área", e);
+    }
+
+    // Step 2: Build the Overpass Query
+    let overpassQuery = '';
+    if (bboxString) {
+      overpassQuery = `
+        [out:json][timeout:25]${bboxString};
+        (
+          node[${tag}]${websiteFilter};
+          way[${tag}]${websiteFilter};
+          relation[${tag}]${websiteFilter};
+        );
+        out center 150;
+      `;
+    } else {
+      const locationQuery = city ? `area["name"~"${city}",i]["admin_level"="8"]->.searchArea;` : `area["name"~"Brasil",i]["admin_level"="2"]->.searchArea;`;
+      const searchArea = city ? '(area.searchArea)' : '(area.searchArea)';
+      overpassQuery = `
+        [out:json][timeout:25];
+        ${locationQuery}
+        (
+          node[${tag}]${websiteFilter}${searchArea};
+          way[${tag}]${websiteFilter}${searchArea};
+          relation[${tag}]${websiteFilter}${searchArea};
+        );
+        out center 150;
+      `;
+    }
+
+    // Step 3: Fetch using our local robust backend proxy
+    try {
+      const bodyParams = new URLSearchParams();
+      bodyParams.append('data', overpassQuery);
+
+      const response = await fetch(this.baseUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: bodyParams
+      });
+
       if (!response.ok) {
-        throw new Error('Falha ao conectar com o serviço de busca.');
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `Falha no servidor (${response.status}).`);
       }
 
       const data = await response.json();
